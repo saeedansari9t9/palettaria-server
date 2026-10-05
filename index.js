@@ -88,16 +88,20 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-app.post('/api/products', authenticate, isAdmin, upload.single('image'), async (req, res) => {
+app.post('/api/products', authenticate, isAdmin, upload.array('images', 5), async (req, res) => {
   try {
     const { name, description, category, price, originalPrice, featured, inStock } = req.body;
+    const imageUrls = req.files ? req.files.map(f => f.path) : [];
+    if (imageUrls.length === 0) return res.status(400).json({ error: 'At least 1 image is required' });
+
     const newProduct = new Product({
       name,
       description,
       category,
       price: Number(price),
       originalPrice: originalPrice ? Number(originalPrice) : undefined,
-      image: req.file.path, // Cloudinary URL
+      image: imageUrls[0], // Cloudinary URL
+      images: imageUrls,
       featured: featured === 'true',
       inStock: inStock === 'true',
       active: true
@@ -109,10 +113,13 @@ app.post('/api/products', authenticate, isAdmin, upload.single('image'), async (
   }
 });
 
-app.patch('/api/products/:id', authenticate, isAdmin, upload.single('image'), async (req, res) => {
+app.patch('/api/products/:id', authenticate, isAdmin, upload.array('images', 5), async (req, res) => {
   try {
     const updates = { ...req.body };
-    if (req.file) updates.image = req.file.path;
+    if (req.files && req.files.length > 0) {
+      updates.images = req.files.map(f => f.path);
+      updates.image = updates.images[0];
+    }
     
     // Convert string booleans/numbers from FormData
     if (updates.featured !== undefined) updates.featured = String(updates.featured) === 'true';
