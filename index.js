@@ -5,6 +5,7 @@ require('dotenv').config();
 
 const Product = require('./models/Product');
 const Order = require('./models/Order');
+const Category = require('./models/Category');
 const { upload } = require('./utils/cloudinary');
 
 const app = express();
@@ -73,10 +74,99 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// ── Category Seeding ────────────────────────────────────────────────────────
+const seedCategories = async () => {
+  try {
+    const defaults = ['Clay Art', 'Paintings', 'Islamic Art'];
+    const productCategories = await Product.distinct('category');
+    const allToEnsure = Array.from(new Set([...defaults, ...productCategories.filter(Boolean)]));
+    for (const name of allToEnsure) {
+      const exists = await Category.findOne({ name: { $regex: new RegExp(`^${name}$`, 'i') } });
+      if (!exists) {
+        await Category.create({ name });
+      }
+    }
+  } catch (err) {
+    console.error('Error seeding categories:', err);
+  }
+};
+
 // ── MongoDB Connection ───────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Connected to MongoDB'))
+  .then(async () => {
+    console.log('Connected to MongoDB');
+    await seedCategories();
+  })
   .catch(err => console.error('MongoDB connection error:', err));
+
+// ── Category Routes ──────────────────────────────────────────────────────────
+app.get('/api/categories', async (req, res) => {
+  try {
+    const categories = await Category.find().sort({ name: 1 });
+    res.json(categories);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/categories', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { name, description, icon } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Category name is required' });
+    }
+    const cleanName = name.trim();
+    const existing = await Category.findOne({ name: { $regex: new RegExp(`^${cleanName}$`, 'i') } });
+    if (existing) {
+      return res.status(400).json({ error: 'Category already exists' });
+    }
+    const category = new Category({
+      name: cleanName,
+      description: description ? description.trim() : '',
+      icon: icon ? icon.trim() : ''
+    });
+    await category.save();
+    res.status(201).json(category);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/categories/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { name, description, icon } = req.body;
+    const category = await Category.findById(req.params.id);
+    if (!category) return res.status(404).json({ error: 'Category not found' });
+
+    if (name && name.trim()) {
+      const oldName = category.name;
+      const cleanName = name.trim();
+      if (cleanName.toLowerCase() !== oldName.toLowerCase()) {
+        const duplicate = await Category.findOne({ name: { $regex: new RegExp(`^${cleanName}$`, 'i') } });
+        if (duplicate) return res.status(400).json({ error: 'Category with this name already exists' });
+      }
+      category.name = cleanName;
+      // Cascade update existing products under this category
+      await Product.updateMany({ category: oldName }, { category: cleanName });
+    }
+    if (description !== undefined) category.description = description.trim();
+    if (icon !== undefined) category.icon = icon.trim();
+    await category.save();
+    res.json(category);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/categories/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    const category = await Category.findByIdAndDelete(req.params.id);
+    if (!category) return res.status(404).json({ error: 'Category not found' });
+    res.json({ message: 'Category deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── Product Routes ───────────────────────────────────────────────────────────
 app.get('/api/products', async (req, res) => {
@@ -94,6 +184,22 @@ app.post('/api/products', authenticate, isAdmin, upload.array('images', 5), asyn
     const imageUrls = req.files ? req.files.map(f => f.path) : [];
     if (imageUrls.length === 0) return res.status(400).json({ error: 'At least 1 image is required' });
 
+    let specifications = [];
+    if (req.body.specifications) {
+      try {
+        const parsed = typeof req.body.specifications === 'string'
+          ? JSON.parse(req.body.specifications)
+          : req.body.specifications;
+        if (Array.isArray(parsed)) {
+          specifications = parsed
+            .filter(item => item && item.key && String(item.key).trim() !== '' && item.value && String(item.value).trim() !== '')
+            .map(item => ({ key: String(item.key).trim(), value: String(item.value).trim() }));
+        }
+      } catch (err) {
+        console.error('Error parsing specifications in post:', err);
+      }
+    }
+
     const newProduct = new Product({
       name,
       description,
@@ -102,6 +208,7 @@ app.post('/api/products', authenticate, isAdmin, upload.array('images', 5), asyn
       originalPrice: originalPrice ? Number(originalPrice) : undefined,
       image: imageUrls[0], // Cloudinary URL
       images: imageUrls,
+      specifications,
       featured: featured === 'true',
       inStock: inStock === 'true',
       active: true
@@ -127,6 +234,23 @@ app.patch('/api/products/:id', authenticate, isAdmin, upload.array('images', 5),
     if (updates.active !== undefined) updates.active = String(updates.active) === 'true';
     if (updates.price !== undefined) updates.price = Number(updates.price);
     if (updates.originalPrice !== undefined) updates.originalPrice = Number(updates.originalPrice);
+
+    if (updates.specifications !== undefined) {
+      try {
+        const parsed = typeof updates.specifications === 'string'
+          ? JSON.parse(updates.specifications)
+          : updates.specifications;
+        if (Array.isArray(parsed)) {
+          updates.specifications = parsed
+            .filter(item => item && item.key && String(item.key).trim() !== '' && item.value && String(item.value).trim() !== '')
+            .map(item => ({ key: String(item.key).trim(), value: String(item.value).trim() }));
+        } else {
+          updates.specifications = [];
+        }
+      } catch (err) {
+        console.error('Error parsing specifications in patch:', err);
+      }
+    }
 
     const product = await Product.findByIdAndUpdate(req.params.id, updates, { new: true });
     if (!product) return res.status(404).json({ error: 'Product not found' });
@@ -170,7 +294,11 @@ app.post('/api/orders', async (req, res) => {
 
 app.patch('/api/orders/:id', authenticate, isAdmin, async (req, res) => {
   try {
-    const order = await Order.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    const updates = { ...req.body };
+    if (updates.advanceAmount !== undefined) {
+      updates.advanceAmount = Number(updates.advanceAmount) || 0;
+    }
+    const order = await Order.findOneAndUpdate({ id: req.params.id }, updates, { new: true });
     res.json(order);
   } catch (err) {
     res.status(400).json({ error: err.message });

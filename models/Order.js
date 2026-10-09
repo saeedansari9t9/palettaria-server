@@ -11,13 +11,16 @@ const orderSchema = new mongoose.Schema({
       id: String,
       name: String,
       price: Number,
-      qty: Number
+      qty: Number,
+      specifications: Array
     }
   ],
   total: { type: Number, required: true },
+  advanceAmount: { type: Number, default: 0 },
   status: { type: String, enum: ['pending', 'processing', 'shipped', 'delivered', 'cancelled'], default: 'pending' },
-  paymentStatus: { type: String, enum: ['paid', 'unpaid', 'pending_verification'], default: 'unpaid' },
+  paymentStatus: { type: String, enum: ['paid', 'unpaid', 'pending_verification', 'advance_received'], default: 'unpaid' },
   paymentMethod: { type: String },
+  note: { type: String },
   createdAt: { type: Date, default: Date.now }
 });
 

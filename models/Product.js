@@ -8,6 +8,11 @@ const productSchema = new mongoose.Schema({
   originalPrice: { type: Number },
   image: { type: String, required: true }, // Cloudinary URL
   images: [{ type: String }],
+  specifications: [{
+    key: { type: String, required: true },
+    value: { type: String, default: '' },
+    _id: false
+  }],
   inStock: { type: Boolean, default: true },
   featured: { type: Boolean, default: false },
   active: { type: Boolean, default: true },
