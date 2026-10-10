@@ -12,6 +12,7 @@ const app = express();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('./models/User');
+const Setting = require('./models/Setting');
 
 app.use(cors());
 app.use(express.json());
@@ -69,6 +70,51 @@ app.post('/api/auth/login', async (req, res) => {
 
     const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET);
     res.json({ token, user: { name: user.name, email: user.email, role: user.role } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/change-password', authenticate, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Both current and new password are required' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) return res.status(400).json({ error: 'Incorrect current password' });
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+    res.json({ message: 'Password updated successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/auth/profile', authenticate, async (req, res) => {
+  try {
+    const { name, email } = req.body;
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (email && email.toLowerCase() !== user.email.toLowerCase()) {
+      const existing = await User.findOne({ email });
+      if (existing) return res.status(400).json({ error: 'Email already in use' });
+      user.email = email;
+    }
+    if (name && name.trim()) {
+      user.name = name.trim();
+    }
+    await user.save();
+    res.json({ user: { name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -309,6 +355,137 @@ app.delete('/api/orders/:id', authenticate, isAdmin, async (req, res) => {
   try {
     await Order.findOneAndDelete({ id: req.params.id });
     res.json({ message: 'Order deleted' });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ── User Management Routes ───────────────────────────────────────────────────
+app.get('/api/users', authenticate, isAdmin, async (req, res) => {
+  try {
+    const users = await User.find().select('-password').sort({ createdAt: -1 });
+    const orders = await Order.find().sort({ createdAt: -1 });
+
+    // Correlate users with their orders
+    const enrichedUsers = users.map(user => {
+      const uObj = user.toObject();
+      const userEmail = (uObj.email || '').toLowerCase().trim();
+      
+      const userOrders = orders.filter(o => 
+        o.email && o.email.toLowerCase().trim() === userEmail
+      );
+
+      const totalSpent = userOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+      const ordersCount = userOrders.length;
+      const lastOrder = userOrders[0] || null;
+
+      return {
+        ...uObj,
+        ordersCount,
+        totalSpent,
+        lastOrder: lastOrder ? {
+          id: lastOrder.id,
+          total: lastOrder.total,
+          status: lastOrder.status,
+          paymentStatus: lastOrder.paymentStatus,
+          createdAt: lastOrder.createdAt
+        } : null,
+        orders: userOrders.map(o => ({
+          id: o.id,
+          total: o.total,
+          status: o.status,
+          paymentStatus: o.paymentStatus,
+          paymentMethod: o.paymentMethod,
+          createdAt: o.createdAt,
+          itemsCount: o.items?.length || 0,
+          items: o.items || []
+        }))
+      };
+    });
+
+    res.json(enrichedUsers);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/users', authenticate, isAdmin, async (req, res) => {
+  try {
+    const { name, email, password, role } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Name, email and password are required' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const existing = await User.findOne({ email });
+    if (existing) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new User({
+      name: name.trim(),
+      email: email.trim().toLowerCase(),
+      password: hashedPassword,
+      role: role === 'admin' ? 'admin' : 'user'
+    });
+    await newUser.save();
+
+    res.status(201).json({
+      _id: newUser._id,
+      name: newUser.name,
+      email: newUser.email,
+      role: newUser.role,
+      createdAt: newUser.createdAt,
+      ordersCount: 0,
+      totalSpent: 0,
+      lastOrder: null,
+      orders: []
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/users/:id', authenticate, isAdmin, async (req, res) => {
+  try {
+    if (req.user.id === req.params.id) {
+      return res.status(400).json({ error: 'You cannot delete your own admin account' });
+    }
+
+    const user = await User.findByIdAndDelete(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ message: 'User deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Store Settings Routes ────────────────────────────────────────────────────
+app.get('/api/settings', async (req, res) => {
+  try {
+    let settings = await Setting.findOne();
+    if (!settings) {
+      settings = await Setting.create({});
+    }
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/settings', authenticate, isAdmin, async (req, res) => {
+  try {
+    let settings = await Setting.findOne();
+    if (!settings) {
+      settings = new Setting(req.body);
+    } else {
+      Object.assign(settings, req.body, { updatedAt: new Date() });
+    }
+    await settings.save();
+    res.json(settings);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
